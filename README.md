@@ -38,6 +38,38 @@ pip install "flash_attn==2.6.3" --no-build-isolation
 
 Training heavily leverages the [composer](https://github.com/mosaicml/composer) framework. All training are configured via YAML files, of which you can find examples in the `yamls` folder. We highly encourage you to check out one of the example yamls, such as `yamls/main/flex-bert-rope-base.yaml`, to explore the configuration options.
 
+### Launch command example
+To run a training job using `yamls/main/modernbert-base.yaml` on all available GPUs, use the following command.
+```
+composer main.py yamls/main/modernbert-base.yaml
+```
+
+### Data
+
+There are two dataset classes to choose between:
+
+`StreamingTextDataset`
+* inherits from [StreamingDataset](https://docs.mosaicml.com/projects/streaming/en/latest/preparing_datasets/dataset_format.html)
+* uses MDS, CSV/TSV or JSONL format
+* Supports both text and tokenized data
+* can be used with local data as well
+* WARNING: we found distribution of memory over accelerators to be uneven
+
+`NoStreamingDataset`
+* requires decompressed MDS-format, compressed MDS-data can be decompressed using [src/data/mds_conversion.py](src/data/mds_conversion.py)  with the `--decompress` flag.
+* Supports both text and tokenized data
+
+When data is being accessed from local, we recommend using `NoStreamingDataset` as it enabled higher training throughput in our setting. Both classes are located in [src/text_data.py](src/text_data.py), and the class to be used for a dataset can be set for each data_loader and dataset by setting streaming: true (StreamingTextDataset) or false (NoStreamingDataset).
+
+```
+train_loader:
+  name: text
+  dataset:
+    streaming: false
+```
+
+To get started, you can experiment with c4 data using the [following instructions](https://github.com/mosaicml/examples/tree/main/examples/benchmarks/bert#prepare-your-data).
+
 
 ## Evaluations
 
