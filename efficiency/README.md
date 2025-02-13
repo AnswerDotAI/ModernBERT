@@ -1,0 +1,1 @@
+This folder contains the code for batch size checks and basic efficiency tests. Every result was spot checked individually, for each model, to ensure proper batch size and runtime estimates. You may check these results on the [efficiency-spotchecks](https://github.com/AnswerDotAI/ModernBERT/tree/efficiency-spotchecks/efficiency) branch.
