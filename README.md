@@ -39,9 +39,9 @@ pip install "flash_attn==2.6.3" --no-build-isolation
 Training heavily leverages the [composer](https://github.com/mosaicml/composer) framework. All training are configured via YAML files, of which you can find examples in the `yamls` folder. We highly encourage you to check out one of the example yamls, such as `yamls/main/flex-bert-rope-base.yaml`, to explore the configuration options.
 
 ### Launch command example
-To run a training job using `yamls/main/modernbert-base.yaml` on all available GPUs, use the following command.
+To run a training job using `yamls/main/flex-bert-base.yaml` on all available GPUs, use the following command.
 ```
-composer main.py yamls/main/modernbert-base.yaml
+composer main.py yamls/main/flex-bert-base.yaml
 ```
 
 ### Data
