@@ -12,7 +12,7 @@ run_name: modernbert-base-pretrain
 # Model
 model:
   name: flex_bert
-  pretrained_model_name: bert-base-uncased # has to be set to bert-base-uncased legacy reasons
+  pretrained_model_name: bert-base-uncased # has to be set to bert-base-uncased to inherit a few configs
   tokenizer_name: ${tokenizer_name}
   disable_train_metrics: true # save some time by not computing metrics on the training set
   model_config:
@@ -73,7 +73,7 @@ train_loader:
     streaming: false
   drop_last: true
   num_workers: 6
-  sequence_packing: true
+  sequence_packing: true  # only works with non-streaming dataset
   batch_size_warmup_min_size: ${device_train_microbatch_size}
   batch_size_warmup_tokens: 50_000_000_000tok
 
@@ -133,6 +133,8 @@ callbacks:
     window_size: 100
   lr_monitor: {}
   scheduled_gc: {}
+  dataloader_speed: {}
+  runtime_estimator: {}
   log_grad_norm:
     batch_log_interval: 10
   packing_efficiency:
@@ -151,3 +153,4 @@ save_folder: checkpoints/{run_name}
 
 # Load from local filesystem or remote object store to
 # load_path: null
+# auto_resume: true  # uncomment this to load latest one from checkpoint folder 
