@@ -41,6 +41,7 @@ def conf_callback(ctx: typer.Context, param: typer.CallbackParam, config: Option
 class ModelSize(str, Enum):
     BASE = "base"
     LARGE = "large"
+    HUGE = "huge"
 
 
 def get_model_defaults(model_size: ModelSize):
@@ -57,6 +58,12 @@ def get_model_defaults(model_size: ModelSize):
             "hidden_size": 1024,
             "intermediate_size": 2624,
             "num_attention_heads": 16,
+        },
+        "huge": {
+            "num_hidden_layers": 32,
+            "hidden_size": 1536,
+            "intermediate_size": 4096,
+            "num_attention_heads": 24,
         },
     }
 
@@ -225,7 +232,9 @@ def main(
     head_class_dropout: Annotated[float, Option(help="Classification head dropout rate", rich_help_panel="Model Options")] = 0.0,
     fast_ultrafeedback: Annotated[bool, Option("--fast-ultrafeedback", help="Use a shorter sequence length (1536) for the UltraFeedback eval", rich_help_panel="Task Settings")] = False,
     seeds: Annotated[List[int], Option(help="List of seeds to use for the eval", rich_help_panel="Task Settings")] = [1618, 42, 6033, 3145],
+    gpu_ids: Annotated[List[int], Option(help="List of GPU IDs to use for the eval", rich_help_panel="Task Settings")] = [0],
     parallel: Annotated[bool, Option("--parallel/--single", help="Run the evals in parallel on multiple GPUs or one GPU. Only use if evaluating a single checkpoint on multiple GPUs.", rich_help_panel="Task Settings")] = False,
+    eval_batch_count: Annotated[Optional[int], Option(help="Number of batches to evaluate", rich_help_panel="Task Settings")] = None,
     config: Annotated[Optional[Path], Option(callback=conf_callback, is_eager=True, help="Relative path to YAML config file for setting options. Passing CLI options will supersede config options.", case_sensitive=False, rich_help_panel="Options")] = None,
 ):  # fmt: skip
     # Read the input YAML file
@@ -236,14 +245,25 @@ def main(
         ckpt = checkpoint.name  # checkpoint
         ckpt_path = checkpoint.parent
     elif checkpoint.is_dir():
-        ckpts = list(checkpoint.glob("*.pt"))
+        # Search recursively for checkpoint files
+        ckpts = list(checkpoint.glob("**/*.pt"))
         if len(ckpts) == 1:
             ckpt = ckpts[0].name
+            ckpt_path = ckpts[0].parent
         elif len(ckpts) > 1:
-            ckpt = "latest-rank0.pt"
+            # Look for latest-rank0.pt in any subfolder
+            latest_ckpts = list(checkpoint.glob("**/latest-rank0.pt"))
+            if latest_ckpts:
+                ckpt = latest_ckpts[0].name
+                ckpt_path = latest_ckpts[0].parent
+            else:
+                # Default to first checkpoint found
+                ckpt = ckpts[0].name
+                ckpt_path = ckpts[0].parent
         elif len(ckpts) == 0:
-            raise ValueError(f"No checkpoint found in the provided directory: {checkpoint}")
-        ckpt_path = checkpoint
+            raise ValueError(f"No checkpoint found in the provided directory or its subdirectories: {checkpoint}")
+        else:
+            ckpt_path = checkpoint
     else:
         raise ValueError(f"Invalid checkpoint path provided: {checkpoint}")
 
@@ -295,6 +315,8 @@ def main(
     else:
         base_run_name = safe_get(input_config, "run_name", ckpt_path.name)
     new_config["base_run_name"] = base_run_name
+    if eval_batch_count is not None:
+        new_config["base_run_name"] = f"{base_run_name}-{eval_batch_count}"
 
     new_config["default_seed"] = 19
     new_config["precision"] = safe_get(input_config, "precision")
@@ -388,7 +410,12 @@ def main(
 
         elif task_name == "mnli":
             task_config["seeds"] = seeds[:3]
-            task_config["trainer_kwargs"] = {"save_num_checkpoints_to_keep": 1, "max_duration": "2ep"}
+            task_config["trainer_kwargs"] = {
+                "save_num_checkpoints_to_keep": 1, 
+                "max_duration": "2ep",
+                "batch_size": 64,
+                "device_train_microbatch_size": "auto",
+            }
 
         elif task_name == "boolq":
             task_config["seeds"] = seeds[:3]
@@ -416,6 +443,8 @@ def main(
             )
             task_config["seeds"] = seeds[:3]
         tasks_dict[task_name] = task_config
+
+    task_config["gpu_ids"] = gpu_ids
 
     new_config["tasks"] = tasks_dict
 

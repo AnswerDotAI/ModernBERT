@@ -4,16 +4,19 @@
 import os
 import random
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
 import time
 import warnings
+
 from collections import deque
 from enum import Enum
 from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import Annotated, List, Optional
+
 
 import datasets
 import psutil
@@ -41,6 +44,7 @@ app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]}, pret
 class ModelSize(str, Enum):
     BASE = "base"
     LARGE = "large"
+    HUGE = "huge"
 
 
 # from maxb2: https://github.com/tiangolo/typer/issues/86#issuecomment-996374166
@@ -68,8 +72,10 @@ all_processes = []
 # Global list to specify which GPUs to use
 allowed_gpus = None  # Will be set to list of GPU IDs or None
 
+console = Console()
 
-def kill_process_tree(pid):
+
+def kill_process_tree(pid: int):
     try:
         parent = psutil.Process(pid)
         children = parent.children(recursive=True)
@@ -213,7 +219,7 @@ def run_job(
         # Store process info for GPU management
         gpus_in_use[gpu_id] = {"process": process, "stderr_file": stderr_file, "config": config_path}
 
-    if gpu_id is None:
+    else:
         process.wait()
         handle_process_completion(process, stderr_file, config_path, verbose, gpu_id=None)
         if delete_eval_yamls:
@@ -334,7 +340,11 @@ def create_symlink_for_newest_checkpoint(folder: Path, override_existing: bool =
     if folder.is_dir():
         pt_files = list(folder.glob("*.pt"))
         if not pt_files:
-            print(f"   Warning: No .pt file found in {folder}.")
+            print(f"   Warning: No .pt file found in {folder}, skipping symlink creation.")
+            return
+
+        if len(pt_files) == 1 and pt_files[0].name == "latest-rank0.pt" and not pt_files[0].is_symlink():
+            print(f"   Only found one .pt in {folder.name}, named 'latest-rank0.pt' (real file). Skipping symlink creation.")  # fmt: skip
             return
 
         # Sort files based on epoch and batch numbers extracted from filenames
@@ -359,25 +369,29 @@ def create_symlink_for_newest_checkpoint(folder: Path, override_existing: bool =
         newest_file = max(pt_files, key=extract_numbers)
 
         symlink_path = folder / "latest-rank0.pt"
-        if symlink_path.exists() and symlink_path.is_symlink():
+        if symlink_path.is_symlink():
             if symlink_path.resolve() == newest_file.resolve():
-                print(f"   Existing symlink points to latest checkpoint: {newest_file.parent.name}/{newest_file.name}")
+                print(f"   Existing symlink in {folder.name} already points to {newest_file.name}")
                 return
             else:
                 print(
-                    f"   Warning: Existing symlink points to {symlink_path.parent.name}/{symlink_path.name}, "
-                    f"but latest checkpoint is {newest_file.parent.name}/{newest_file.name}"
+                    f"   Warning: symlink in {folder.name} points to {symlink_path.resolve().name}, "
+                    f"but newest is {newest_file.name}"
                 )
                 if not override_existing:
                     return
+                symlink_path.unlink(missing_ok=True)
+        elif symlink_path.exists():
+            if not override_existing:
+                print(f"   {symlink_path.name} is a real file in {folder.name}. Use override to remove it.")
+                return
+            symlink_path.unlink(missing_ok=True)
 
         symlink_path.symlink_to(newest_file.name)
         if override_existing:
-            print(
-                f"   Overwriting existing symlink with {symlink_path.parent.name}/{symlink_path.name} -> {newest_file.name}"
-            )
+            print(f"   Overwrote symlink {symlink_path.name} -> {newest_file.name}")
         else:
-            print(f"   Created new symlink {symlink_path.parent.name}/{symlink_path.name} -> {newest_file.name}")
+            print(f"   Created new symlink {symlink_path.name} -> {newest_file.name}")
 
 
 def generate_eval_configs(
@@ -391,6 +405,7 @@ def generate_eval_configs(
     pooling_type: Optional[str],
     head_class_act: Optional[str],
     head_class_norm: Optional[str],
+    eval_batch_count: Optional[str],
     head_class_dropout: float,
     tasks: Optional[List[TaskName]],  # type: ignore
     fast_ultrafeedback: bool,
@@ -399,6 +414,7 @@ def generate_eval_configs(
     use_dir_names: Optional[bool],
     model_size: ModelSize,
     rope_theta: Optional[float],
+    gpu_ids: Optional[List[int]] = None,
 ):
     """Generate evaluation configs for each checkpoint."""
 
@@ -456,7 +472,10 @@ def generate_eval_configs(
         # Add tasks
         if tasks:
             for task in tasks:
-                cmd.extend(["--tasks", task.value])
+                if hasattr(task, "value"):
+                    cmd.extend(["--tasks", task.value])
+                else:
+                    cmd.extend(["--tasks", str(task)])
 
         if fast_ultrafeedback:
             cmd.append("--fast-ultrafeedback")
@@ -464,9 +483,20 @@ def generate_eval_configs(
         for seed in seeds:
             cmd.extend(["--seeds", str(seed)])
 
-        cmd.append("--parallel") if parallel else cmd.append("--single")
+        if parallel:
+            cmd.append("--parallel")
+
+        if eval_batch_count:
+            cmd.extend(["--eval-batch-count", str(eval_batch_count)])
+
+        if gpu_ids:
+            if isinstance(gpu_ids, int):
+                gpu_ids = [gpu_ids]
+            for g in gpu_ids:
+                cmd.extend(["--gpu-ids", str(g)])
 
         # Run the config generation process without suppressing output
+
         run_subprocess(cmd, show_errors=True)
         if not train_config:
             time.sleep(1)
@@ -483,7 +513,6 @@ def download_dataset(dataset_name: str, subset: Optional[str] = None):
 def download_datasets(tasks: List[TaskName], msg_queue):  # type: ignore
     try:
         required_datasets = []
-
         task_to_datasets = {
             "mlmmlu_amateur_semipro": [["answerdotai/MLMMLU", "Amateur"], ["answerdotai/MLMMLU", "Semipro"]],
             "mlmmlu_rookie_reserve": [["answerdotai/MLMMLU", "Rookie"], ["answerdotai/MLMMLU", "Reserve"]],
@@ -508,7 +537,7 @@ def download_datasets(tasks: List[TaskName], msg_queue):  # type: ignore
 
         msgs = []
         for dataset_name, subset in required_datasets:
-            datasets.load_dataset(dataset_name, subset)
+            datasets.load_dataset(dataset_name, subset, trust_remote_code=True)
             msgs.append(f"Successfully downloaded {dataset_name} {subset}")
         msg_queue.put("    " + "\n    ".join(msgs) + "\n")
     except Exception as e:
@@ -624,14 +653,11 @@ def download_hub_files(
     return downloaded_files
 
 
-console = Console()
-
-
 @app.command()
 def main(
     checkpoints: Annotated[Path, Option(help="Path to the directory containing FlexBert checkpoints or location to download checkpoints from Hugging Face Hub to", rich_help_panel="Checkpoint & Config Paths", show_default=False)],
     train_config: Annotated[Optional[Path], Option(help="Path to a .yaml file containing training configuration. If one is not provided, will attempt to load the config from a wandb run or use defaults.", rich_help_panel="Checkpoint & Config Paths")] = None,
-    model_size: Annotated[ModelSize, Option("--model-size", help="Model to use for default model config", rich_help_panel="Checkpoint & Config Paths")] = ModelSize.BASE,
+    model_size: Annotated[ModelSize, Option("--model-size", help="Model to use for default model config", rich_help_panel="Checkpoint & Config Paths")] = ModelSize.HUGE,
     rope_theta: Annotated[Optional[float], Option("--rope-theta", help="Value for `rotary_emb_base` in the model configuration. If not provided, defaults to pretraining value of 10000.0", rich_help_panel="Checkpoint & Config Paths")] = None,
     skip_generation: Annotated[bool, Option("--skip-generation", help="Skip generation of evaluation configs. If not true, assumes all existing eval yamls have been already ran.", rich_help_panel="Checkpoint & Config Paths")] = False,
     run_all_yamls: Annotated[bool, Option("--run-all-yamls", help="Run all evaluation yamls in the `checkpoints` directory, even if some have already been run.", rich_help_panel="Checkpoint & Config Paths")] = False,
@@ -656,37 +682,40 @@ def main(
     delete_eval_yamls: Annotated[bool, Option("--delete/--keep", help="Delete all evaluation YAML files after running the evals. Use `delete_eval_yamls` if passing to `config`", rich_help_panel="Config Options")] = False,
     use_dir_names: Annotated[Optional[bool], Option("--use-dir-names", help="Use the folder names as the wandb run names. Defaults to true if multiple `checkpoints` are provided with one `train_config`", rich_help_panel="Config Options")] = None,
     gpu_ids: Annotated[Optional[List[int]], Option(help="List of GPU IDs to use", rich_help_panel="GPU Options")] = None,
+    eval_batch_count: Annotated[Optional[int], Option("--eval-batch-count", help="Number of batches to evaluate", rich_help_panel="Task Settings")] = None,
     config: Annotated[Optional[Path], Option(callback=conf_callback, is_eager=True, help="Relative path to YAML config file for setting options. Passing CLI options will supersede config options.", case_sensitive=False, rich_help_panel="Options")] = None,
 ):  # fmt: skip
     """Run evaluations on model checkpoints."""
+    if isinstance(checkpoints, str):
+        checkpoints = Path(checkpoints)
+    if isinstance(train_config, str):
+        train_config = Path(train_config)
 
-    # Set the allowed_gpus global variable
     global allowed_gpus
-    if gpu_ids is not None:
-        allowed_gpus = gpu_ids
-    else:
-        allowed_gpus = None  # Use all GPUs
+    allowed_gpus = gpu_ids
 
     if hub_repo:
-        print(f"\nDownloading files from {hub_repo}...")
+        print(f"\nDownloading from {hub_repo} to {checkpoints} ...")
         downloaded_files = download_hub_files(
-            repo_id=hub_repo, filenames=hub_files, output_dir=checkpoints, token=hub_token
+            repo_id=hub_repo,
+            filenames=hub_files,
+            output_dir=checkpoints,
+            token=hub_token,
         )
         if not downloaded_files:
             print("No files were downloaded successfully. Exiting.")
             raise Exit(code=1)
         print(f"Successfully downloaded {len(downloaded_files)} files to {checkpoints}")
 
-    # Set default tasks to all tasks if not provided
-    all_tasks = [task for task in TaskName]
-    tasks = tasks or all_tasks
+    if not tasks or len(tasks) == 0:
+        tasks = [t for t in TaskName]
 
     print("\nAsynchronously downloading required datasets...")
     msg_queue = Queue()
     download_process = Process(target=download_datasets, args=(tasks, msg_queue))
     download_process.start()
 
-    print("\nCreating symlinks for latest checkpoints...")
+    print("\nCreating symlinks for newest checkpoints...")
     for folder in checkpoints.glob("*"):
         if folder.is_dir() and not folder.name.startswith("."):
             create_symlink_for_newest_checkpoint(folder, overwrite_existing_symlinks)
@@ -717,13 +746,15 @@ def main(
             tasks=tasks,
             fast_ultrafeedback=fast_ultrafeedback,
             seeds=seeds,
+            eval_batch_count=eval_batch_count,
             parallel=parallel,
             use_dir_names=use_dir_names,
             model_size=model_size,
             rope_theta=rope_theta,
+            gpu_ids=gpu_ids,
         )
-        config_files = list(checkpoints.glob("*_evaluation.yaml"))
-        config_files = sorted(list(set(config_files) - set(config_files_completed)))
+        config_files = list(set(checkpoints.glob("*_evaluation.yaml")) - set(config_files_completed))
+        config_files = sorted(config_files)
     else:
         config_files = list(checkpoints.glob("*_evaluation.yaml"))
 
@@ -738,13 +769,13 @@ def main(
     while not msg_queue.empty():
         print(msg_queue.get())
 
-    if len(config_files) >= 1 and parallel is False:
-        manage_jobs(configs=config_files, verbose=verbose, delete_eval_yamls=delete_eval_yamls)
-    elif len(config_files) > 1 and parallel is True:
-        raise ValueError(f"{parallel=} is only supported for running one config at a time.")
-    elif len(config_files) == 1 and parallel is True:
+    if len(config_files) >= 1 and not parallel:
+        manage_jobs(config_files, verbose=verbose, delete_eval_yamls=delete_eval_yamls)
+    elif len(config_files) > 1 and parallel:
+        raise ValueError("Parallel runs only supported for a single config at a time.")
+    elif len(config_files) == 1 and parallel:
         if not verbose:
-            console.print(f"[bold green]Running {config_files[0].name} in parallel on GPUs {', '.join(map(str, gpu_ids))}")  # fmt: skip
+            console.print(f"[bold green]Running {config_files[0].name} in parallel on GPUs: {gpu_ids}")
         run_job(config_files[0], verbose=verbose, delete_eval_yamls=delete_eval_yamls, gpu_ids=gpu_ids)
     else:
         message = "No configuration files found in the specified directory."
@@ -760,16 +791,21 @@ def main(
     else:
         console.print("[bold green]All jobs completed.")
 
+    shutil.rmtree("./checkpoints", ignore_errors=True)
+    shutil.rmtree("./finetuned-checkpoints", ignore_errors=True)
+
 
 # Register the signal handler
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+# Recursively delete ./checkpoints and ignore any problems.
+
 if __name__ == "__main__":
     try:
         app()
     finally:
-        # Ensure all subprocesses are terminated when the script exits
+        # Ensure all subprocesses are terminated when the script exits 
         for process in all_processes:
             if process.poll() is None:
                 process.terminate()
