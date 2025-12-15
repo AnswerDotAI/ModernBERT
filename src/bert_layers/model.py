@@ -407,6 +407,11 @@ class BertForMaskedLM(BertPreTrainedModel):
             loss_fct = nn.CrossEntropyLoss()
             masked_token_idx = torch.nonzero(labels.flatten() > 0, as_tuple=False).flatten()
             loss = loss_fct(prediction_scores, labels.flatten()[masked_token_idx])
+            
+            # Add MoE auxiliary losses if present
+            aux_loss = self._get_aux_loss()
+            if aux_loss is not None:
+                loss = loss + aux_loss
 
             assert input_ids is not None, "Coding error; please open an issue"
             batch, seqlen = input_ids.shape[:2]
@@ -1021,6 +1026,20 @@ class FlexBertForMaskedLM(FlexBertPreTrainedModel):
 
         # Initialize weights and apply final processing
         self._init_weights(reset_params=False)
+    
+    def _get_aux_loss(self) -> Optional[torch.Tensor]:
+        """Collect auxiliary losses from all MoE layers in the model."""
+        aux_loss = None
+        
+        # Traverse all modules to find FlexBertGLUMoE layers
+        for module in self.modules():
+            if hasattr(module, 'aux_loss') and module.aux_loss is not None:
+                if aux_loss is None:
+                    aux_loss = module.aux_loss
+                else:
+                    aux_loss = aux_loss + module.aux_loss
+        
+        return aux_loss
 
     def _init_weights(self, module: Optional[nn.Module] = None, reset_params: Optional[bool] = None):
         assert (module is None) != (reset_params is None), "arg module xor reset_params must be specified"
@@ -1265,6 +1284,20 @@ class FlexBertForSequenceClassification(FlexBertPreTrainedModel):
         # Initialize weights and apply final processing
         self._init_weights(reset_params=False)
 
+    def _get_aux_loss(self) -> Optional[torch.Tensor]:
+        """Collect auxiliary losses from all MoE layers in the model."""
+        aux_loss = None
+        
+        # Traverse all modules to find FlexBertGLUMoE layers
+        for module in self.modules():
+            if hasattr(module, 'aux_loss') and module.aux_loss is not None:
+                if aux_loss is None:
+                    aux_loss = module.aux_loss
+                else:
+                    aux_loss = aux_loss + module.aux_loss
+        
+        return aux_loss
+
     def _init_weights(self, module: Optional[nn.Module] = None, reset_params: Optional[bool] = None):
         assert (module is None) != (reset_params is None), "arg module xor reset_params must be specified"
         if module:
@@ -1352,6 +1385,11 @@ class FlexBertForSequenceClassification(FlexBertPreTrainedModel):
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = nn.BCEWithLogitsLoss()
                 loss = loss_fct(logits, labels)
+            
+            # Add MoE auxiliary losses if present
+            aux_loss = self._get_aux_loss()
+            if aux_loss is not None:
+                loss = loss + aux_loss
 
         if not return_dict:
             output = (logits,) + output

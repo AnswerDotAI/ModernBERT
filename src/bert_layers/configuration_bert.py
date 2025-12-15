@@ -58,7 +58,7 @@ class FlexBertConfig(TransformersBertConfig):
         loss_kwargs: dict = {},
         mlp_dropout_prob: float = 0.0,
         mlp_in_bias: bool = False,
-        mlp_layer: str = "mlp",
+        mlp_layer: str = "glu_moe",
         mlp_out_bias: bool = False,
         norm_kwargs: dict = {},
         normalization: str = "rmsnorm",
@@ -97,6 +97,13 @@ class FlexBertConfig(TransformersBertConfig):
         pad_logits: bool = False,
         compile_model: bool = False,
         masked_prediction: bool = False,
+        moe_num_experts: int = 8,
+        moe_top_k: int = 2,
+        moe_use_noisy_top_k: bool = True,
+        moe_capacity_factor: float = 1.25,
+        moe_compute_aux_loss: bool = True,
+        moe_load_balance_loss_weight: float = 0.01,
+        moe_router_z_loss_weight: float = 0.001,
         **kwargs,
     ):
         """
@@ -156,6 +163,13 @@ class FlexBertConfig(TransformersBertConfig):
             pad_logits (bool): Pad logits after the calculating the loss.
             compile_model (bool): Compile the subset of the model which can be compiled.
             masked_prediction (bool): Use only pass the masked tokens throught the final MLM layers
+            moe_num_experts (int): Number of experts for Mixture of Experts layers.
+            moe_top_k (int): Number of top experts to select for each token in MoE.
+            moe_use_noisy_top_k (bool): Use noisy top-k gating for exploration during training.
+            moe_capacity_factor (float): Capacity factor for expert assignment in MoE.
+            moe_compute_aux_loss (bool): Whether to compute and add auxiliary losses for MoE.
+            moe_load_balance_loss_weight (float): Weight for the load balancing auxiliary loss.
+            moe_router_z_loss_weight (float): Weight for the router z-loss auxiliary loss.
             **kwargs: Additional keyword arguments.
         """
         super().__init__(attention_probs_dropout_prob=attention_probs_dropout_prob, **kwargs)
@@ -213,6 +227,13 @@ class FlexBertConfig(TransformersBertConfig):
         self.pad_logits = pad_logits
         self.compile_model = compile_model
         self.masked_prediction = masked_prediction
+        self.moe_num_experts = moe_num_experts
+        self.moe_top_k = moe_top_k
+        self.moe_use_noisy_top_k = moe_use_noisy_top_k
+        self.moe_capacity_factor = moe_capacity_factor
+        self.moe_compute_aux_loss = moe_compute_aux_loss
+        self.moe_load_balance_loss_weight = moe_load_balance_loss_weight
+        self.moe_router_z_loss_weight = moe_router_z_loss_weight
 
         if loss_kwargs.get("return_z_loss", False):
             if loss_function != "fa_cross_entropy":
